@@ -360,7 +360,7 @@ async def shield_violation_generator(
         output_text="",
         **mirrored_params,
     )
-    created_response_dict = created_response_object.model_dump(exclude_none=True)
+    created_response_dict = created_response_object.model_dump(exclude_none=True, by_alias=True)
     created_event = {
         "type": "response.created",
         "sequence_number": sequence_number,
@@ -378,7 +378,7 @@ async def shield_violation_generator(
         output_index=output_index,
         sequence_number=sequence_number,
     )
-    data_json = json.dumps(item_added_event.model_dump(exclude_none=True))
+    data_json = json.dumps(item_added_event.model_dump(exclude_none=True, by_alias=True))
     yield f"event: response.output_item.added\ndata: {data_json}\n\n"
 
     # 3. Send response.output_item.done event
@@ -389,7 +389,7 @@ async def shield_violation_generator(
         output_index=output_index,
         sequence_number=sequence_number,
     )
-    data_json = json.dumps(item_done_event.model_dump(exclude_none=True))
+    data_json = json.dumps(item_done_event.model_dump(exclude_none=True, by_alias=True))
     yield f"event: response.output_item.done\ndata: {data_json}\n\n"
 
     # 4. Send response.completed event with status "completed" and output populated
@@ -406,7 +406,7 @@ async def shield_violation_generator(
         output_text=extract_text_from_response_output_item(refusal_response),
         **mirrored_params,
     )
-    completed_response_dict = completed_response_object.model_dump(exclude_none=True)
+    completed_response_dict = completed_response_object.model_dump(exclude_none=True, by_alias=True)
     completed_event = {
         "type": "response.completed",
         "sequence_number": sequence_number,
@@ -452,7 +452,7 @@ async def response_generator(
         event_type = getattr(chunk, "type", None)
         logger.debug("Processing streaming chunk, type: %s", event_type)
 
-        chunk_dict = chunk.model_dump()
+        chunk_dict = chunk.model_dump(exclude_none=True, by_alias=True)
 
         # Ensure sequence_number is present on every event
         if "sequence_number" not in chunk_dict:
@@ -634,7 +634,7 @@ async def handle_non_streaming_response(
                 configuration=configuration,
             )
             response = ResponsesResponse.model_construct(
-                **api_response.model_dump(),
+                **api_response.model_dump(by_alias=True),
                 output_text=api_response.output_text,
             )
 

@@ -103,7 +103,7 @@ class ResponsesRequest(BaseModel):
     generate_topic_summary: Optional[bool] = None
 
     model_config = {
-        "extra": "forbid",
+        "extra": "ignore",
         "json_schema_extra": {
             "examples": [
                 {
@@ -203,6 +203,7 @@ class ResponsesRequest(BaseModel):
                 "conversation",
             },
             exclude_none=True,
+            by_alias=True,
         )
 
 
