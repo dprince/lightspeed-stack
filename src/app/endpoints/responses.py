@@ -347,6 +347,7 @@ async def shield_violation_generator(
     normalized_conv_id = normalize_conversation_id(conversation_id)
 
     # 1. Send response.created event with status "in_progress" and empty output
+    sequence_number = 0
     created_response_object = ResponsesResponse.model_construct(
         id=response_id,
         created_at=created_at,
@@ -362,6 +363,7 @@ async def shield_violation_generator(
     created_response_dict = created_response_object.model_dump(exclude_none=True)
     created_event = {
         "type": "response.created",
+        "sequence_number": sequence_number,
         "response": created_response_dict,
     }
     data_json = json.dumps(created_event)
@@ -391,6 +393,7 @@ async def shield_violation_generator(
     yield f"event: response.output_item.done\ndata: {data_json}\n\n"
 
     # 4. Send response.completed event with status "completed" and output populated
+    sequence_number = 3
     completed_response_object = ResponsesResponse.model_construct(
         id=response_id,
         created_at=created_at,
@@ -406,6 +409,7 @@ async def shield_violation_generator(
     completed_response_dict = completed_response_object.model_dump(exclude_none=True)
     completed_event = {
         "type": "response.completed",
+        "sequence_number": sequence_number,
         "response": completed_response_dict,
         "available_quotas": available_quotas,
     }
@@ -442,12 +446,18 @@ async def response_generator(
     logger.debug("Starting streaming response (Responses API) processing")
 
     latest_response_object: Optional[ResponseObject] = None
+    sequence_number = 0
 
     async for chunk in stream:
         event_type = getattr(chunk, "type", None)
         logger.debug("Processing streaming chunk, type: %s", event_type)
 
         chunk_dict = chunk.model_dump()
+
+        # Ensure sequence_number is present on every event
+        if "sequence_number" not in chunk_dict:
+            chunk_dict["sequence_number"] = sequence_number
+        sequence_number = chunk_dict["sequence_number"] + 1
 
         # Add conversation attribute to the response if chunk has it
         if "response" in chunk_dict:
