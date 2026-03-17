@@ -1,0 +1,65 @@
+From f4c6c8dfd7665c173d9d47cf53ad0d217d0764fa Mon Sep 17 00:00:00 2001
+From: Dan Prince <dprince@redhat.com>
+Date: Mon, 9 Mar 2026 13:07:55 -0400
+Subject: [PATCH] fix: Use convert_tooldef_to_openai_tool for function tool
+ serialization
+
+The Responses API function tool conversion used model_dump() to build
+the ChatCompletionToolParam function dict, which leaked the "type"
+field (and would leak any future fields like defer_loading) into the
+FunctionDefinition. OpenAI silently ignores extra fields, but stricter
+endpoints (e.g. Gemini) reject them.
+
+Instead of a fragile denylist (exclude={"type"}), reuse
+convert_tooldef_to_openai_tool which explicitly picks only the fields
+that belong in a FunctionDefinition. Added strict parameter support to
+convert_tooldef_to_openai_tool so function tools can pass it through.
+
+Signed-off-by: Dan Prince <dprince@redhat.com>
+---
+ .../meta_reference/responses/streaming.py     |  8 +-
+ .../utils/inference/openai_compat.py          |  5 +-
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/llama_stack/providers/inline/agents/meta_reference/responses/streaming.py b/src/llama_stack/providers/inline/agents/meta_reference/responses/streaming.py
+index 995430bd..c4f0710c 100644
+--- a/src/llama_stack/providers/inline/agents/meta_reference/responses/streaming.py
++++ b/src/llama_stack/providers/inline/agents/meta_reference/responses/streaming.py
+@@ -1201,7 +1201,13 @@
+
+         for input_tool in tools:
+             if input_tool.type == "function":
+-                self.ctx.chat_tools.append(ChatCompletionToolParam(type="function", function=input_tool.model_dump()))  # type: ignore[typeddict-item,arg-type]  # Dict compatible with FunctionDefinition
++                tool_def = ToolDefinition(
++                    tool_name=input_tool.name,
++                    description=input_tool.description,
++                    input_schema=input_tool.parameters,
++                )
++                openai_tool = convert_tooldef_to_openai_tool(tool_def, strict=input_tool.strict)
++                self.ctx.chat_tools.append(openai_tool)  # type: ignore[arg-type]  # Returns dict but ChatCompletionToolParam expects TypedDict
+             elif input_tool.type in WebSearchToolTypes:
+                 tool_name = "web_search"
+                 # Need to access tool_groups_api from tool_executor
+diff --git a/src/llama_stack/providers/utils/inference/openai_compat.py b/src/llama_stack/providers/utils/inference/openai_compat.py
+index f8aed0ee..1cee5b23 100644
+--- a/src/llama_stack/providers/utils/inference/openai_compat.py
++++ b/src/llama_stack/providers/utils/inference/openai_compat.py
+@@ -15,7 +15,7 @@
+ logger = get_logger(name=__name__, category="providers::utils")
+
+
+-def convert_tooldef_to_openai_tool(tool: ToolDefinition) -> dict:
++def convert_tooldef_to_openai_tool(tool: ToolDefinition, strict: bool | None = None) -> dict:
+     """
+     Convert a ToolDefinition to an OpenAI API-compatible dictionary.
+
+@@ -59,6 +59,9 @@
+     # NOTE: OpenAI does not support output_schema, so we drop it here
+     # It's stored in LlamaStack for validation and other provider usage
+
++    if strict is not None:
++        function["strict"] = strict  # type: ignore[index]  # dict value inferred as Any but mypy sees Collection[str]
++
+     return out
+
+

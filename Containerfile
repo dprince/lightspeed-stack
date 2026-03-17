@@ -96,6 +96,12 @@ RUN mkdir -p /opt/app-root/src/.llama/storage /opt/app-root/src/.llama/providers
 RUN mkdir -p /opt/app-root/src/.cache/huggingface && \
     chown -R 1001:1001 /opt/app-root/src/.cache
 
+# Apply patches to vendored dependencies
+COPY patches/ /app-root/patches/
+RUN for p in /app-root/patches/*.patch; do \
+    patch -p2 -d /app-root/.venv/lib/python3.12/site-packages < "$p"; \
+    done
+
 # Add executables from .venv to system PATH
 ENV PATH="/app-root/.venv/bin:$PATH"
 
