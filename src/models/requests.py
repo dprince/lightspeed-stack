@@ -723,7 +723,7 @@ class ResponsesRequest(BaseModel):
     solr: Optional[dict[str, Any]] = None
 
     model_config = {
-        "extra": "forbid",
+        "extra": "ignore",
         "json_schema_extra": {
             "examples": [
                 {
