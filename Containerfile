@@ -129,6 +129,10 @@ RUN for p in /app-root/patches/*.patch; do \
     patch -p2 -d /app-root/.venv/lib/python3.12/site-packages < "$p"; \
     done
 
+# Install external providers (lightspeed-providers)
+COPY --chown=1001:1001 external_providers/ /opt/app-root/src/.llama/providers.d/
+COPY --chown=1001:1001 lightspeed_stack_providers/ /app-root/.venv/lib/python3.12/site-packages/lightspeed_stack_providers/
+
 # Add executables from .venv to system PATH
 ENV PATH="/app-root/.venv/bin:$PATH"
 
