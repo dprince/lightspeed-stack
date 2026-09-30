@@ -26,6 +26,7 @@ from app.endpoints.responses import (
     _persist_blocked_response_turn,
     _sanitize_response_dict,
     _should_filter_mcp_chunk,
+    _store_response_query_results,
     handle_non_streaming_response,
     handle_streaming_response,
     response_generator,
@@ -598,6 +599,159 @@ class TestResponsesEndpointHandler:
         assert (
             call_args[1] == "What is K8s?"
         )  # input_text (2nd arg to build_rag_context)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode,expected_query,rewrite_called",
+        [
+            # default: the whole resent history is the retrieval query
+            ("full", "first question first answer latest question", False),
+            # opt-in: only the latest user turn
+            ("latest_turn", "latest question", False),
+            # opt-in: the LLM-rewritten standalone query
+            ("rewrite", "rewritten standalone query", True),
+        ],
+    )
+    async def test_rag_query_mode_selects_retrieval_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        dummy_request: Request,
+        minimal_config: AppConfig,
+        mocker: MockerFixture,
+        mode: str,
+        expected_query: str,
+        rewrite_called: bool,
+    ) -> None:
+        """The RAG retrieval query follows the rag_query_mode config knob."""
+        structured_input: list[Any] = [
+            OpenAIResponseMessage(role="user", content="first question"),
+            OpenAIResponseMessage(role="assistant", content="first answer"),
+            OpenAIResponseMessage(role="user", content="latest question"),
+        ]
+        responses_request = ResponsesRequest(input=cast("Any", structured_input))
+        minimal_config.configuration.rag_query_mode = mode
+        _patch_base(mocker, minimal_config)
+        _patch_client(mocker)
+        _patch_resolve_response_context(mocker)
+        mocker.patch(
+            f"{MODULE}.select_model_for_responses",
+            new=mocker.AsyncMock(return_value="provider/model1"),
+        )
+        mocker.patch(
+            f"{MODULE}.check_model_configured",
+            new=mocker.AsyncMock(return_value=True),
+        )
+        mock_build_rag = mocker.patch(
+            f"{MODULE}.build_rag_context",
+            new=mocker.AsyncMock(
+                return_value=RAGContext(context_text="", referenced_documents=[]),
+            ),
+        )
+        mock_rewrite = mocker.patch(
+            f"{MODULE}.rewrite_search_query",
+            new=mocker.AsyncMock(return_value="rewritten standalone query"),
+        )
+        _patch_moderation(mocker, decision="passed")
+        mocker.patch(
+            f"{MODULE}.handle_non_streaming_response",
+            new=mocker.AsyncMock(
+                return_value=_make_responses_response(
+                    output_text="ok", conversation="conv_new"
+                )
+            ),
+        )
+
+        await responses_endpoint_handler(
+            request=dummy_request,
+            responses_request=responses_request,
+            auth=MOCK_AUTH,
+            mcp_headers={},
+        )
+
+        assert mock_build_rag.call_args[0][1] == expected_query
+        assert mock_rewrite.called is rewrite_called
+
+    @pytest.mark.asyncio
+    async def test_rag_rewrite_not_called_when_moderation_blocked(
+        self,
+        dummy_request: Request,
+        minimal_config: AppConfig,
+        mocker: MockerFixture,
+    ) -> None:
+        """With rewrite mode but blocked moderation, no rewrite LLM call is made."""
+        structured_input: list[Any] = [
+            OpenAIResponseMessage(role="user", content="latest question"),
+        ]
+        responses_request = ResponsesRequest(input=cast("Any", structured_input))
+        minimal_config.configuration.rag_query_mode = "rewrite"
+        _patch_base(mocker, minimal_config)
+        _patch_client(mocker)
+        _patch_resolve_response_context(mocker)
+        mocker.patch(
+            f"{MODULE}.select_model_for_responses",
+            new=mocker.AsyncMock(return_value="provider/model1"),
+        )
+        mocker.patch(
+            f"{MODULE}.check_model_configured",
+            new=mocker.AsyncMock(return_value=True),
+        )
+        mock_build_rag = mocker.patch(
+            f"{MODULE}.build_rag_context", new=mocker.AsyncMock()
+        )
+        mock_rewrite = mocker.patch(
+            f"{MODULE}.rewrite_search_query",
+            new=mocker.AsyncMock(return_value="rewritten standalone query"),
+        )
+        _patch_moderation(mocker, decision="blocked")
+        mocker.patch(
+            f"{MODULE}.handle_non_streaming_response",
+            new=mocker.AsyncMock(
+                return_value=_make_responses_response(
+                    output_text="blocked", conversation="conv_new"
+                )
+            ),
+        )
+
+        await responses_endpoint_handler(
+            request=dummy_request,
+            responses_request=responses_request,
+            auth=MOCK_AUTH,
+            mcp_headers={},
+        )
+
+        mock_rewrite.assert_not_called()
+        mock_build_rag.assert_not_called()
+
+    def test_persisted_query_uses_full_input_text(self, mocker: MockerFixture) -> None:
+        """The stored turn query is the full extracted input text."""
+        store = mocker.patch(f"{MODULE}.store_query_results")
+        mocker.patch(
+            f"{MODULE}.normalize_conversation_id",
+            return_value=VALID_CONV_ID_NORMALIZED,
+        )
+        api_params = mocker.Mock(
+            store=True,
+            conversation=VALID_CONV_ID,
+            model="provider/model1",
+        )
+        context = mocker.Mock(
+            auth=MOCK_AUTH,
+            started_at=datetime.now(UTC),
+            input_text="first question first answer latest question",
+        )
+
+        stored = _store_response_query_results(
+            api_params,
+            context,
+            turn_summary=mocker.Mock(),
+            completed_at=datetime.now(UTC),
+            topic_summary=None,
+        )
+
+        assert stored is True
+        assert (
+            store.call_args.kwargs["query"]
+            == "first question first answer latest question"
+        )
 
     @pytest.mark.asyncio
     async def test_responses_blocked_with_conversation_appends_refusal(

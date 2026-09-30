@@ -101,6 +101,7 @@ from utils.responses import (
     check_model_configured,
     deduplicate_referenced_documents,
     extract_attachments_text,
+    extract_latest_user_text,
     extract_text_from_response_items,
     extract_token_usage,
     extract_vector_store_ids_from_tools,
@@ -111,6 +112,7 @@ from utils.responses import (
     parse_referenced_documents,
     resolve_client_tool_choice,
     resolve_tool_choice,
+    rewrite_search_query,
     select_model_for_responses,
 )
 from utils.rh_identity import get_rh_identity_context
@@ -568,6 +570,7 @@ async def handle_responses_with_tracing(  # pylint: disable=too-many-locals
         if isinstance(original_request.input, str)
         else extract_text_from_response_items(original_request.input)
     )
+    latest_user_text = extract_latest_user_text(original_request.input)
     attachments_count = _count_request_attachments(original_request.input)
 
     span_attributes: dict[SpanAttributes, Any] = {
@@ -631,6 +634,7 @@ async def handle_responses_with_tracing(  # pylint: disable=too-many-locals
     ):
         client = await AsyncOgxClientHolder().update_azure_token()
 
+    shields_config = configuration.configuration
     attachments_text = extract_attachments_text(original_request.input)
     add_span_event(root_span, SpanEvents.VALIDATION_COMPLETED)
 
@@ -638,7 +642,7 @@ async def handle_responses_with_tracing(  # pylint: disable=too-many-locals
 
     moderation_result = await run_shield_moderation_v2(
         input_text + "\n\n" + attachments_text,
-        configuration.configuration.shields,
+        shields_config.shields,
         responses_request.shield_ids,
     )
 
@@ -670,9 +674,20 @@ async def handle_responses_with_tracing(  # pylint: disable=too-many-locals
     )
     # Build RAG context from Inline RAG sources (skip when input shields blocked)
     if moderation_result.decision == "passed":
+        rag_mode = configuration.configuration.rag_query_mode
+        rag_query = input_text
+        if rag_mode in ("latest_turn", "rewrite"):
+            rag_query = latest_user_text
+            if rag_mode == "rewrite":
+                rag_query = await rewrite_search_query(
+                    original_request.input,
+                    client,
+                    updated_request.model,
+                    latest_user_text,
+                )
         inline_rag_context = await build_rag_context(
             client,
-            input_text,
+            rag_query,
             vector_store_ids,
             original_request.solr,
         )

@@ -133,6 +133,22 @@ Input:
 Output:
 """
 
+# Number of most recent user turns fed to the /v1/responses RAG query rewrite call.
+# Bounds the rewrite input so the rewrite request itself cannot hit the backend
+# query size limit; not exposed as a configuration option.
+RAG_REWRITE_HISTORY_TURNS: Final[int] = 3
+
+# Default system prompt for the /v1/responses RAG query rewrite call, used only when
+# no query rewrite prompt is specified in the configuration file
+DEFAULT_QUERY_REWRITE_SYSTEM_PROMPT: Final[str] = """
+Instructions:
+- You rewrite a conversation into a single standalone search query for document retrieval.
+- Read the whole conversation and focus on the user's latest message.
+- Resolve pronouns and references (e.g. "it", "that") using earlier turns so the query
+  stands on its own without the conversation.
+- Return only the rewritten search query, no preamble, quotes, or explanation.
+"""
+
 # Authentication constants
 DEFAULT_VIRTUAL_PATH: Final[str] = "/ls-access"
 DEFAULT_USER_NAME: Final[str] = "lightspeed-user"

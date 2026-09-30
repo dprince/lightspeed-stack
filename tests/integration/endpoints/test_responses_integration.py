@@ -6,11 +6,12 @@ but all internal subsystems (config, DB, shield moderation, conversation storage
 run with real code.
 """
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import Request
 from fastapi.responses import StreamingResponse
+from ogx_api.openai_responses import OpenAIResponseMessage
 from ogx_client.models.open_ai_response_object import OpenAIResponseObject
 from pytest_mock import MockerFixture
 from sqlalchemy.orm import Session
@@ -154,6 +155,51 @@ def _configure_shield_blocked(
         "app.endpoints.responses.run_shield_moderation_v2",
         return_value=blocked,
     )
+
+
+@pytest.mark.asyncio
+async def test_rewrite_mode_issues_extra_rewrite_call(
+    test_config: AppConfig,
+    mocker: MockerFixture,
+    test_request: Request,
+    test_db_session: Session,
+) -> None:
+    """rag_query_mode=rewrite adds a store=False rewrite call before the inference call."""
+    test_config.configuration.rag_query_mode = "rewrite"
+    mock_client = _setup_test(mocker)
+
+    request = ResponsesRequest(
+        input=cast(
+            "Any",
+            [
+                OpenAIResponseMessage(role="user", content="What is Ansible?"),
+                OpenAIResponseMessage(role="assistant", content="An automation tool."),
+                OpenAIResponseMessage(role="user", content="and its default port?"),
+            ],
+        ),
+        model="test-provider/test-model",
+        stream=False,
+        store=True,
+        generate_topic_summary=False,
+    )
+
+    response = await responses_endpoint_handler(
+        request=test_request,
+        responses_request=request,
+        auth=MOCK_AUTH,
+        mcp_headers={},
+    )
+
+    assert isinstance(response, ResponsesResponse)
+    # One extra responses.create for the rewrite, on top of the inference call.
+    assert mock_client.responses.create.call_count == 2
+    rewrite_call = mock_client.responses.create.call_args_list[0]
+    assert rewrite_call.kwargs["store"] is False
+
+    conversation = (
+        test_db_session.query(UserConversation).filter_by(id=NORMALIZED_CONV_ID).first()
+    )
+    assert conversation is not None
 
 
 @pytest.mark.asyncio

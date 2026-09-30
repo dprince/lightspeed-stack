@@ -83,6 +83,7 @@ from utils.responses import (
     build_mcp_tool_call_from_arguments_done,
     build_tool_call_summary,
     build_tool_result_from_mcp_output_item_done,
+    extract_latest_user_text,
     extract_rag_chunks_from_file_search_item,
     extract_text_from_response_item,
     extract_text_from_response_items,
@@ -103,6 +104,8 @@ from utils.responses import (
     resolve_source_for_result,
     resolve_tool_choice,
     resolve_vector_store_ids,
+    rewrite_search_query,
+    select_recent_turns,
 )
 
 
@@ -293,6 +296,189 @@ def test_extract_text_preserves_order() -> None:
     result = extract_text_from_response_item(output_item)
 
     assert result == "First Second Third Fourth"
+
+
+def _conversation_items() -> list[Any]:
+    """Build a multi-turn conversation: user, assistant, user, assistant, user."""
+    return [
+        make_output_item(item_type="message", role="user", content="first question"),
+        make_output_item(item_type="message", role="assistant", content="first answer"),
+        make_output_item(item_type="message", role="user", content="second question"),
+        make_output_item(
+            item_type="message", role="assistant", content="second answer"
+        ),
+        make_output_item(item_type="message", role="user", content="third question"),
+    ]
+
+
+def test_select_recent_turns_string_passthrough() -> None:
+    """A string input is returned unchanged."""
+    assert select_recent_turns("just a string", 1) == "just a string"
+
+
+def test_select_recent_turns_latest_only() -> None:
+    """num_turns=1 returns only the final user turn."""
+    items = _conversation_items()
+    result = select_recent_turns(items, 1)
+    assert result == items[-1:]
+    assert extract_text_from_response_items(result) == "third question"
+
+
+def test_select_recent_turns_multiple() -> None:
+    """num_turns=2 returns from the second-to-last user turn onward."""
+    items = _conversation_items()
+    result = select_recent_turns(items, 2)
+    # Window starts at the 2nd-most-recent user turn (index 2) through the end,
+    # including the intervening assistant item.
+    assert result == items[2:]
+    assert extract_text_from_response_items(result) == (
+        "second question second answer third question"
+    )
+
+
+def test_select_recent_turns_count_at_or_above_available_returns_full() -> None:
+    """When num_turns >= number of user turns, the full input is returned."""
+    items = _conversation_items()
+    assert select_recent_turns(items, 3) == items
+    assert select_recent_turns(items, 99) == items
+
+
+def test_select_recent_turns_non_positive_returns_full() -> None:
+    """num_turns <= 0 returns the full input (fail-safe)."""
+    items = _conversation_items()
+    assert select_recent_turns(items, 0) == items
+    assert select_recent_turns(items, -1) == items
+
+
+def test_select_recent_turns_empty_list() -> None:
+    """An empty input yields an empty result."""
+    assert select_recent_turns([], 1) == []
+
+
+def test_extract_latest_user_text_returns_last_user_message() -> None:
+    """Returns only the last user message text, ignoring earlier and assistant turns."""
+    items = _conversation_items()
+    assert extract_latest_user_text(items) == "third question"
+
+
+def test_extract_latest_user_text_ignores_trailing_assistant() -> None:
+    """A trailing assistant turn does not shadow the latest user message."""
+    items = _conversation_items() + [
+        make_output_item(item_type="message", role="assistant", content="third answer"),
+    ]
+    assert extract_latest_user_text(items) == "third question"
+
+
+def test_extract_latest_user_text_string_passthrough() -> None:
+    """A string input is returned unchanged."""
+    assert extract_latest_user_text("hello") == "hello"
+
+
+def test_extract_latest_user_text_no_user_falls_back_to_full() -> None:
+    """With no user message, falls back to the full extracted text."""
+    items = [
+        make_output_item(item_type="message", role="assistant", content="a"),
+        make_output_item(item_type="message", role="assistant", content="b"),
+    ]
+    assert extract_latest_user_text(items) == "a b"
+
+
+class TestRewriteSearchQuery:
+    """Tests for rewrite_search_query."""
+
+    @pytest.mark.asyncio
+    async def test_returns_rewritten_text_on_success(
+        self, mocker: MockerFixture
+    ) -> None:
+        """A successful rewrite returns the model's standalone query."""
+        mock_client = mock_async_ogx_client(mocker)
+        mock_response = mocker.Mock()
+        mock_response.output = [
+            make_output_item(
+                item_type="message", role="assistant", content="standalone query"
+            )
+        ]
+        mock_client.responses.create = mocker.AsyncMock(return_value=mock_response)
+        mocker.patch(
+            "utils.responses.get_query_rewrite_system_prompt", return_value="Rewrite:"
+        )
+
+        result = await rewrite_search_query(
+            _conversation_items(), mock_client, "model1", "fallback"
+        )
+
+        assert result == "standalone query"
+        mock_client.responses.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_api_error(self, mocker: MockerFixture) -> None:
+        """An API error returns the fallback query instead of raising."""
+        mock_client = mock_async_ogx_client(mocker)
+        mock_client.responses.create = mocker.AsyncMock(
+            side_effect=ApiException(status=500, reason="boom")
+        )
+        mocker.patch(
+            "utils.responses.get_query_rewrite_system_prompt", return_value="Rewrite:"
+        )
+
+        result = await rewrite_search_query(
+            _conversation_items(), mock_client, "model1", "the fallback"
+        )
+
+        assert result == "the fallback"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_empty_output(self, mocker: MockerFixture) -> None:
+        """An empty rewrite output returns the fallback query."""
+        mock_client = mock_async_ogx_client(mocker)
+        mock_response = mocker.Mock()
+        mock_response.output = []
+        mock_client.responses.create = mocker.AsyncMock(return_value=mock_response)
+        mocker.patch(
+            "utils.responses.get_query_rewrite_system_prompt", return_value="Rewrite:"
+        )
+
+        result = await rewrite_search_query(
+            _conversation_items(), mock_client, "model1", "the fallback"
+        )
+
+        assert result == "the fallback"
+
+    @pytest.mark.asyncio
+    async def test_bounds_input_to_recent_turns(self, mocker: MockerFixture) -> None:
+        """Only the most recent turns are sent to the rewrite call, not the transcript."""
+        items = [
+            make_output_item(
+                item_type="message", role="user", content="oldest question"
+            ),
+            make_output_item(item_type="message", role="assistant", content="a1"),
+            make_output_item(
+                item_type="message", role="user", content="second question"
+            ),
+            make_output_item(item_type="message", role="assistant", content="a2"),
+            make_output_item(
+                item_type="message", role="user", content="third question"
+            ),
+            make_output_item(item_type="message", role="assistant", content="a3"),
+            make_output_item(
+                item_type="message", role="user", content="latest question"
+            ),
+        ]
+        mock_client = mock_async_ogx_client(mocker)
+        mock_response = mocker.Mock()
+        mock_response.output = [
+            make_output_item(item_type="message", role="assistant", content="rewritten")
+        ]
+        mock_client.responses.create = mocker.AsyncMock(return_value=mock_response)
+        mocker.patch(
+            "utils.responses.get_query_rewrite_system_prompt", return_value="Rewrite:"
+        )
+
+        await rewrite_search_query(items, mock_client, "model1", "fallback")
+
+        sent_input = mock_client.responses.create.call_args.kwargs["input"]
+        assert "oldest question" not in sent_input
+        assert "latest question" in sent_input
 
 
 def test_extract_text_with_refusal_content() -> None:

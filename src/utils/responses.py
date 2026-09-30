@@ -89,7 +89,7 @@ from pydantic_ai.profiles.openai import openai_model_profile
 
 import constants
 from configuration import configuration
-from constants import DEFAULT_RAG_TOOL
+from constants import DEFAULT_RAG_TOOL, RAG_REWRITE_HISTORY_TURNS
 from log import get_logger
 from metrics import recording
 from models.api.requests import QueryRequest
@@ -128,7 +128,11 @@ from utils.otel_tracing import (
     add_span_event,
     set_span_attributes,
 )
-from utils.prompts import get_system_prompt, get_topic_summary_system_prompt
+from utils.prompts import (
+    get_query_rewrite_system_prompt,
+    get_system_prompt,
+    get_topic_summary_system_prompt,
+)
 from utils.query import (
     extract_provider_and_model_from_model_id,
     handle_known_apistatus_errors,
@@ -253,6 +257,49 @@ async def maybe_get_topic_summary(
                 {SpanAttributes.TOPIC_SUMMARY_SUCCESS: success},
             )
             add_span_event(span, SpanEvents.TOPIC_SUMMARY_TASK_FINISHED)
+
+
+async def rewrite_search_query(
+    response_input: ResponseInput,
+    client: AsyncOgxClient,
+    model_id: str,
+    fallback: str,
+) -> str:
+    """Condense the recent conversation into a standalone RAG search query.
+
+    Runs a short, non-stored LLM call over a bounded window of recent turns
+    (``RAG_REWRITE_HISTORY_TURNS``) and returns the rewritten query. Returns
+    ``fallback`` (the latest user turn) on any API error or empty output, so
+    retrieval degrades gracefully instead of failing.
+
+    Args:
+        response_input: The full Responses ``input`` for the request.
+        client: The AsyncOgxClient to use for the rewrite request.
+        model_id: The OGX model ID (full format: provider/model).
+        fallback: Query to return when the rewrite fails or is empty.
+
+    Returns:
+        The rewritten standalone search query, or ``fallback``.
+    """
+    recent = select_recent_turns(response_input, RAG_REWRITE_HISTORY_TURNS)
+    history_text = (
+        recent if isinstance(recent, str) else extract_text_from_response_items(recent)
+    )
+    try:
+        response = cast(
+            "ResponseObject",
+            await client.responses.create(
+                input=history_text,
+                model=normalize_vertex_ai_model_id(model_id),
+                instructions=get_query_rewrite_system_prompt(),
+                stream=False,
+                store=False,
+            ),
+        )
+    except ApiException:
+        return fallback
+
+    return extract_text_from_response_items(response.output).strip() or fallback
 
 
 async def prepare_tools(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1601,6 +1648,61 @@ def extract_text_from_response_items(
             text_fragments.append(text)
 
     return " ".join(text_fragments)
+
+
+def select_recent_turns(
+    response_input: ResponseInput, num_turns: int = 1
+) -> ResponseInput:
+    """Return only the most recent ``num_turns`` user turns from a Responses input.
+
+    A turn starts at a ``role == "user"`` message item; the returned window runs from
+    the start of the Nth-most-recent user turn through the end of the input (intervening
+    assistant items in that window are included). For a string input, or when the input
+    contains ``<= num_turns`` user turns, the full input is returned. Used to bound the
+    input to the /v1/responses RAG query rewrite call.
+
+    Args:
+        response_input: Response input (string or list of response items).
+        num_turns: Number of most recent user turns to keep.
+
+    Returns:
+        The trimmed input, or the original input when trimming does not apply.
+    """
+    if isinstance(response_input, str) or num_turns <= 0:
+        return response_input
+
+    user_indices = [
+        i
+        for i, item in enumerate(response_input)
+        if item.type == "message" and cast("ResponseMessage", item).role == "user"
+    ]
+    if len(user_indices) <= num_turns:
+        return response_input
+
+    return response_input[user_indices[-num_turns] :]
+
+
+def extract_latest_user_text(response_input: ResponseInput) -> str:
+    """Return the text of the most recent ``role == "user"`` message.
+
+    Used to build the RAG retrieval query from the current question only, instead of the
+    whole resent history.
+
+    Args:
+        response_input: Response input (string or list of response items).
+
+    Returns:
+        The latest user message text, or the full extracted text when the input is a
+        string or contains no user message.
+    """
+    if isinstance(response_input, str):
+        return response_input
+
+    for item in reversed(response_input):
+        if item.type == "message" and cast("ResponseMessage", item).role == "user":
+            return extract_text_from_response_item(item)
+
+    return extract_text_from_response_items(response_input)
 
 
 def extract_text_from_response_item(response_item: ResponseItem) -> str:

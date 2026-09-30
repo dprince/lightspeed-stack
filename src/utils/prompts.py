@@ -100,3 +100,25 @@ def get_topic_summary_system_prompt() -> str:
             return prompt
 
     return constants.DEFAULT_TOPIC_SUMMARY_SYSTEM_PROMPT
+
+
+def get_query_rewrite_system_prompt() -> str:
+    """
+    Get the RAG query rewrite system prompt.
+
+    Returns:
+        str: The query rewrite system prompt from the active custom profile if
+             set, otherwise the default prompt.
+    """
+    # profile takes precedence for setting prompt
+    if (
+        configuration.customization is not None
+        and configuration.customization.custom_profile is not None
+    ):
+        prompt = configuration.customization.custom_profile.get_prompts().get(
+            "query_rewrite"
+        )
+        if prompt:
+            return prompt
+
+    return constants.DEFAULT_QUERY_REWRITE_SYSTEM_PROMPT

@@ -3582,6 +3582,19 @@ class Configuration(ConfigurationBase):
         "and a type-specific 'config'.",
     )
 
+    rag_query_mode: Literal["full", "latest_turn", "rewrite"] = Field(
+        default="full",
+        title="How /v1/responses builds the RAG retrieval query",
+        description="Controls the query sent to RAG retrieval on /v1/responses. 'full' "
+        "(default) uses the entire resent conversation history as the query (current "
+        "behavior). 'latest_turn' uses only the most recent user message, which avoids "
+        "the oversized-query failure when stateless clients (e.g. Goose, Codex) resend "
+        "full history each request. 'rewrite' condenses the recent turns into a standalone "
+        "search query via an extra store=False LLM call, improving retrieval for follow-up "
+        "questions; on rewrite failure it falls back to the latest user turn. Only affects "
+        "retrieval.",
+    )
+
     @model_validator(mode="after")
     def validate_shield_names_unique(self) -> Self:
         """Reject shields lists containing duplicate names.
